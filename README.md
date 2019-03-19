@@ -5,7 +5,7 @@
 ### 1.Urban growth/environment
 
 Performed raster overlay to calculate urban growth and development suitability in Philadelphia by ArcGIS which will present in 2019
-Esri User Conferencn
+Esri User Conference
 
 ### 2.Calculating retail site suitability and trade areas
 
