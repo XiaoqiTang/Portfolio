@@ -1,0 +1,106 @@
+---
+title: "MUSA 507 MID-TERM PROJECT: HEDONIC HOME PRICE PREDICTION"
+author: "XIAOQI TANG // ZIXUAN WANG"
+date: "November 11, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(spgwr)
+library(caret)
+library(corrplot)
+library(caret)
+library(AppliedPredictiveModeling)
+library(ggmap)
+library(FNN)
+library(ggmap)
+library(mapview)
+library(devtools)
+library(maps)
+library(ggplot2)
+library(stargazer)
+
+setwd("C:/Users/xiaoqi/Desktop/Ken/mid-term/")
+NSales <- st_read("final/final/final2.shp") 
+vars1 <- NSales[,c(1,2,3:4,6,10,12,13,18:21,23:30,34)]
+vars1 <- vars1 %>%filter(SalePrice > 0)
+vars1$Acre<-vars1$Acrage
+vars1$pop_den<- vars1$popdensity
+vars1$medi_inc<- vars1$med_inco
+vars1$fin_area<- vars1$sf_finishe
+vars1$num_bed<- vars1$bedroomsun
+vars1$cen_air<- vars1$ac_sfyi
+
+vars1$num_col<-vars1$college_co
+vars1$sch_bi<-vars1$school
+vars1$dis_li<-vars1$dis_lib
+
+vars1$City<-vars1$LocationCi
+vars1$ZipCode<-vars1$LocationZi
+vars1$avg_sale<-vars1$MEAN_final
+vars1$dis_assa<-vars1$dis_crime
+vars1$dis_stop<-vars1$dis_transi
+vars1$dis_cen<-vars1$dis_cbd
+vars1$dis_off<-vars1$dis_office
+vars1$dis_rou<-vars1$RoutDistan
+vars1$crash<-vars1$Sumcrash
+
+vars2 <- vars1[,c(2,23:40)]
+logSalePrice<-log(vars1$SalePrice)
+vars2$logSalePrice<-logSalePrice
+vars2 <-
+  vars2 %>%
+  mutate(
+    ZipCode = as.factor(ZipCode),
+    num_bed = as.factor(num_bed)) %>%
+  as.data.frame() %>%
+  select(-geometry)
+
+vars3coorleation<-vars2
+
+vars4residual<-NSales[,c(1:4,6,10,13:16,18:21,23,25:30,34)]
+vars4residual$logSalePrice<-log(NSales$SalePrice)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+
+
+#Data Source
+
+
+
+table of summary statistics
+```{r vars2, echo=FALSE}
+stargazer(vars2, type="text", title = "Summary Statistics")
+
+```
+
+coorelation matrix
+
+```{r vars3coorleation, echo=FALSE}
+
+vars3coorleationCor <- select(vars3coorleation, -num_bed, -City, -ZipCode)
+M <- cor(vars3coorleationCor)
+corrplot(M, method = "number")
+
+```
+
+
+
+#Methods
+
+#Results
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+#Conclusion ad Discussion
+

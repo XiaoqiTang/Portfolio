@@ -1,0 +1,1 @@
+java -XX:-UseGCOverheadLimit -Xms32m -Xmx1024m -jar subwayod.jar subway

@@ -1,0 +1,1313 @@
+---
+title: 'Data Retrieval and Cleaning of Temperature Data from AoT Sensors: A Tutorial'
+author: "AoT Team: Chin Yee Lee, Rongzhi Mai, Xiaoqi Tang"
+date: "February 14, 2019"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+#1 Introduction
+
+  The Array of Things (AoT) is a urban sensor network project, in which scientists, universities, local government, and communities collaborate to collect real-time data on the urban environment for both research and public use. The sensing nodes in this network collect an extensive range of data, including weather (`temperature`, `pressure`, `humidity`), air quality (`particle concentration`, `gas concentration`), light intensity and noise levels. 
+
+####Caveats
+Given that the installation of AoT nodes depends on academic interest and local government and community demand, the network distribution over Chicago is consequentially non-random. This means that the network only provides direct measurements of the built and physical environment in some neighbourhoods in the city - From a spatial representation perspective, the uneven network coverage provides an uneven (direct) understanding of the city's varied neighbourhoods. Furthermore, while the hardware and collected data is extensively documented and regularly updated, the data is only useful for further applied analysis if it is reasonably 'clean' - in other words, one would expect measurements of 30 deg Celsius (86 deg Fahrenheit) temperatures during Chicago's winter period to be questionable. This relies heavily on sensor performance to be consistently accurate.  
+
+All of these should raise three big questions for any informed user of AoT's data:
+
+- How are (active) nodes distributed over Chicago? What kind of social and built environment are these nodes located in?
+- How reliable are the measuremens recorded by the sensor nodes? Does this reliability vary between nodes, sensors, and time?
+- Can we improve the quality of the AoT (temperature) dataset by prediction-based imputation?
+
+This markdown document seeks to fulfil two objectives. Firstly, as a tutorial, this document will present a method for users to **(1) Retrieve and query `temperature` data for `December 2018` from the AoT database**, **(2) Evaluate whether recorded temperature values are 'valid'**, and **(3) Impute valid temperature values for those deemed invalid**. Secondly, through this tutorial, users can have a better understanding of the limitations raised in the questions above.
+
+####A note about terms used in this document
+It should be noted that `node` and `sensor` are not used interchangeably in referring to AoT hardware. A `node` device contains multiple `sensors` that measure different `parameters` such as temperature, humidity, and pressure. In this tutorial, we will be focusing on `temperature` records by the 5 temperature `sensors` within a total of 43 `nodes`.
+
+Temperature values are explored and modelled with in units of deg Celsius. This is primarily because AoT sensors detect temperature in these units. Conversions to deg Fahrenheit are provided when temperature is discussed in text. For reference, 0 deg Celsius is freezing point.
+
+#### Set environment and load library
+```{r, set up, warning=FALSE, message=FALSE, include=FALSE}
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(dbplyr)
+library(lubridate)
+library(leaflet)
+library(tmap)
+library(ggplot2)
+library(sf)
+library(plotly)
+library(sp)
+library(spatstat)
+library(rgeos)
+library(rgdal)
+library(tidyr)
+library(gridExtra)
+library(stringr)
+library(tidyverse)
+library(caret)
+library(sf)
+library(FNN)
+library(spdep)
+library(knitr)
+library(kableExtra)
+library(htmlwidgets)
+
+
+memory.limit(100000000000)
+
+
+```
+
+
+# 2. Retrieve and query temperature data
+
+We first downloaded the `December 2018` records on AoT's [site](https://aot-file-browser.plenar.io/data-sets/chicago-complete). This is a big data set of 11 GB. To manage this, we uploaded the file into an SQL database named `Chicago2018-12.db` using SQLite3.
+
+This allows us to query specific sections of the whole December dataset and load it into our R environment. 
+
+####Connect to SQL and retrieve data
+
+```{r, connect to sql, warning=FALSE, message=FALSE}
+
+#establish connection with database
+con<-dbConnect(SQLite(), dbname='Chicago2018-12.db')
+
+#query
+weatherMonth<-
+  dbSendQuery(con,
+              "SELECT data.timestamp, data.node_id, data.subsystem,data.sensor, data.parameter, data.value_hrf, nodes.lat, nodes.lon
+              FROM data
+              JOIN nodes
+              ON data.node_id = nodes.node_id
+              WHERE data.subsystem 
+              IN ('metsense')")%>%
+  dbFetch()%>%
+  mutate(timestamp2=ymd_hms(timestamp), 
+         date=date(timestamp),
+         value_hrf=as.numeric(value_hrf))%>%
+  filter(parameter=='temperature') #since we are only focusing on temperature data
+
+weatherMonth$sensparam<-str_c(weatherMonth$sensor, weatherMonth$parameter, sep='-') #set an index for node-sensor
+
+```
+
+####Format time to 10-minute intervals
+The best-functioning sensors in the AoT nodes take measurements very frequently almost every half a second. This is a very granular temporal detail, which we may not need. We therefore round each record's timestamp to the nearest 10-minute to facilitate our exploratory analysis in the later sections.
+
+```{r, format time to by10 intervals, warning=FALSE, message=FALSE}
+
+#format time
+weatherMonth%>%
+  mutate(by10=cut(timestamp2, breaks='10 min'))%>%
+  mutate(time=ymd_hms(by10))->weather1
+
+weatherMonth<-weather1
+rm(weather1)
+```
+
+
+#3. Evaluate sensor performance and data reliability
+
+## 3.1 How many nodes are active each day, and where are they located?
+
+We are first interested to know whether all 86 nodes* in the AoT network recorded temperature data consistently over the month of December - a larger number of 'active' nodes will yield a larger sample of temperature readings. At the same time, if the number of 'active nodes' were inconsistent every day, we also want to see how their spatial spread over Chicago varied in December.
+
+*There were 91 nodes listed in the data table provided by the AoT website, but 5 nodes were uninstalled prior to December 2018.
+
+```{r message=FALSE, warning=FALSE}
+
+#load data
+df<-weatherMonth 
+df$date=substr(df$by10,9,10)
+
+#remove NA (no data was collected) and aggregate
+dfnonna <-
+  df %>%
+  filter(!is.na(value_hrf))
+
+dfnonna1 <-  
+  aggregate(node_id~lat+lon+date,data=dfnonna,head,1 )%>%
+  mutate(lon = as.numeric(lon),
+         lat = as.numeric(lat))
+
+#count active nodes
+dfnonnacount <-  
+  aggregate(node_id~lat+lon+date,data=dfnonna,head,1 )%>%
+  mutate(lon = as.numeric(lon),
+         lat = as.numeric(lat)) %>%
+  count(date)
+
+dfnonnacount$count=substr(dfnonnacount$n,0,2)
+```
+
+
+####Daily number of active nodes in December 2018
+
+```{r message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+#  total number line
+hline <- data.frame("date" = 01:31, "hline" = 86)
+ggplot(data=dfnonnacount, aes(x=date, y=n, group=1)) +
+  geom_line(color="skyblue", lwd=1 )+
+  geom_point(lwd=3 , col="orange") +
+  xlab("December") +
+  ylab("amount of active nodes") +
+  xlim(0, 100)+
+  labs(title= "Amount of active nodes in December") +
+  geom_errorbar(data=hline, aes(y=hline, ymin=hline, ymax=hline), col="red", linetype="dashed")+
+  theme_light()
+```
+
+It seems like only around half of the total node population (39 - 41) in the network were active in recording temperature data during December 2018. 
+
+####Where are active nodes located?
+
+We can check where these nodes are located each day in December. Here, we filtered and plotted the active nodes for `2018-12-01`, `2018-12-15`, and `2018-12-31`. 
+
+```{r message=FALSE, warning=FALSE, width=50, height=50}
+#Filtering with 01,15,31 days nodes
+selectdate <-
+  dfnonna1 %>%
+  filter(dfnonna1$date %in% c("01", "15","31")) 
+
+selectdate01 <-
+  dfnonna1 %>%
+  filter(dfnonna1$date == "01") 
+
+selectdate15 <-
+  dfnonna1 %>%
+  filter(dfnonna1$date == "15") 
+
+selectdate31 <-
+  dfnonna1 %>%
+  filter(dfnonna1$date == "31") 
+
+leaflet() %>% 
+  addProviderTiles(providers$Stamen.Toner) %>%
+  
+  addCircleMarkers(data=selectdate01,
+                   lng = ~lon, lat = ~lat, weight = 2,
+                   radius = 5, opacity = 0.25, 
+                   group="2018-12-01",
+                   popup = ~node_id,
+                   color = 'red', fillOpacity = 0.25) %>%
+  addCircleMarkers(data=selectdate15,
+                   lng = ~lon, lat = ~lat, weight = 2,
+                   radius = 5, opacity = 0.25, 
+                   group="2018-12-15",
+                   popup = ~node_id,
+                   color = 'blue', fillOpacity = 0.25) %>%
+  addCircleMarkers(data=selectdate31,
+                   lng = ~lon, lat = ~lat, weight = 2,
+                   radius = 5, opacity = 0.25, 
+                   group="2018-12-31",
+                   popup = ~node_id,
+                   color = 'green', fillOpacity = 0.25)%>%
+  addLayersControl(
+    overlayGroups =c("2018-12-01", "2018-12-15", "2018-12-31"),
+    options = layersControlOptions(collapsed=FALSE)
+  )
+```
+
+```{r, warning=FALSE, message=FALSE}
+rm(df, dfnonna, dfnonna1, dfnonnacount, hline, selectdate, selectdate01, selectdate15, selectdate31) 
+```
+
+
+##3.2 Validity of recorded temperature values
+
+#### Exploring range of temperature values recorded
+
+Now that we know that not all AoT nodes were active during December, the next thing we are interested to know is whether the measurements made by the active sensors in the nodes were at least usable. A quick look at the maximum and miminum values recorded during the month tells us that this is not the case - it seems that the Chicago experienced *really* temperatures of -517 deg Celsius (-819 deg F) and 241 deg Celsius (465 deg F)!
+
+```{r}
+max(weatherMonth$value_hrf, na.rm=TRUE)
+min(weatherMonth$value_hrf, na.rm=TRUE)
+```
+
+Plotting out the values by sensors in the nodes shows us that this may be due to some sensors malfunctioning - most values seem to be reasonably clustered around the 0 deg Celsius point during the December winter.
+
+```{r, fig.width=15, fig.height=10, warning=FALSE}
+#all
+weatherMonth%>%
+  filter(date=='2018-12-15')%>%
+  select(node_id, value_hrf, by10, sensor)%>%
+  ggplot()+
+  geom_point(aes(x=by10, y=value_hrf, col=sensor), alpha=0.4, size=0.2)+
+  scale_color_brewer(palette = 'Accent')+
+  facet_wrap(~node_id, nrow=4)+
+  theme_grey(base_size = 9) +
+  labs(x = "Time of Day", y='Temperature', title='2018-12-15 | Temperature values - All') +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+This brings us to our first step in cleaning the temperature data - defining 'valid' temperature values.
+
+#### First definition of invalidity - within December temperature range
+
+We expect temperatures recorded each day by the AoT nodes to fall within the bounds of the temperatures recorded by the weather stations in Chicago. To account for the possibility of highly local spikes in temperature at some locations, we expanded the bounds by 5 deg Celsius. 
+
+```{r}
+#determine if value_hrf should be removed based on december temperature
+
+dec<-read.csv('december_weather.csv')
+dec$date<-ymd(dec$date)
+
+#number of readings retained during the day
+weatherMonth%>%
+  filter(parameter=='temperature')%>%
+  left_join(dec, by='date')%>%
+  mutate(high_bound = high + 5,
+         low_bound = low - 5) %>%
+  mutate(val_qual = ifelse(value_hrf > high_bound | value_hrf < low_bound, 0, 1))->temp
+
+temp$node_sensparam<-str_c(temp$node_id, temp$sensparam, sep = '-')
+
+rm(dec)
+```
+
+```{r}
+table(temp$val_qual)
+
+```
+
+Based on this criteria, 37% of the measurements were deemed 'invalid' (labelled `val_qual`=`1`). We then plot to see if the distribution of the values during one of the days sampled presents a reasonable trend.
+
+```{r, fig.width=15, fig.height=10}
+temp%>%
+  filter(date=='2018-12-15')%>%
+  filter(val_qual==1)%>%
+  ggplot()+
+  geom_point(aes(x=by10, y=value_hrf, col=sensor), alpha=0.4, size=0.2)+
+  scale_color_brewer(palette = 'Accent')+
+  geom_hline(aes(yintercept = high_bound), color='grey50')+
+  geom_hline(aes(yintercept = low_bound), color='grey50')+
+  facet_wrap(~node_id, nrow=4)+
+  theme_grey(base_size = 9) +
+  labs(x = "Time of Day", y='Temperature', title='2018-12-15 | Temperature values - Valid') +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+It seems that there is another tricky issue here - there is a large variability in temperature values recorded by different sensors in the same node (same location) at the same time. This obviously does not make sense - a location cannot be both -5 deg Celsius and 5 deg Celsius at the same time and same place. Another sign that this might be due to poor sensor performance is that the outlier trend seems to be due to a two usual culprits on this day. For instance, the `tsys01` (purple) sensor consistently recorded lower values than the other sensors in 3 of the nodes. 
+
+This brings us to our second definition of validity.
+
+#### Second definition of invalidity - within 25th and 75th interquartile range of values
+
+Here, our main objective is to remove obvious outliers in the values recorded by different sensors. Given that the distribution of values within each node is unlikely to be a normal one, we define outliers as values beyond the 25th and 75th interquartile range.
+
+```{r}
+temp%>%
+  filter(val_qual==1)%>%
+  group_by(by10, node_id)%>%
+  mutate(quant75= quantile(value_hrf, probs=0.75),
+         quant25= quantile(value_hrf, probs=0.25))%>%
+  mutate(val_qual= ifelse(value_hrf > quant75 | value_hrf < quant25, 0,1))->temp1
+
+table(temp1$val_qual)
+```
+
+Applying this second criteria, we find that 46% of the 'valid' values defined from the first criteria are also invalid.
+
+
+```{r}
+#join datasets 
+temp%>%
+  filter(val_qual==0)%>%
+  bind_rows(temp1)->finaltempMonth
+
+rm(temp, temp1)
+
+table(finaltempMonth$val_qual)
+
+```
+
+In sum, 66.3% of the measurements made by sensors in the AoT nodes are invalid. By plotting the valid values for a sample day (`2018-12-15`) below, we can now observe that the valid values recorded by different sensors in the same nodes are largely similar to one another, and form a tidy temperature trend. Therefore, we can be confident that applying our two criteria of value validity to the initial pool of sensor records helped to achieve a tidier, more realistic temperature trend.
+
+```{r, fig.width=15, fig.height=10}
+finaltempMonth%>%
+  filter(date=='2018-12-15')%>%
+  filter(val_qual==1)%>%
+  ggplot()+
+  geom_point(aes(x=by10, y=value_hrf, col=sensor), alpha=0.4, size=0.2)+
+  scale_color_brewer(palette = 'Accent')+
+  geom_hline(aes(yintercept = high_bound), color='grey50')+
+  geom_hline(aes(yintercept = low_bound), color='grey50')+
+  facet_wrap(~node_id, nrow=4)+
+  theme_grey(base_size = 9) +
+  labs(x = "Time of Day", y='Temperature', title='2018-12-15 | Temperature values - Valid') +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+
+##3.3 Overall node performance based on sensor record validity
+
+Here, an indicator of sensor reliability is the proportion of valid values in the total number of measurements made by the sensor during each time interval. A ratio of 1 (sensor reliability = `ave_val_qual`) indicates that all of the measurements made were deemed valid (a 100% reliable sensor!), while 0 indicates that the sensor did not log any valid readings (a malfunctioning sensor is as useful as an inactive one!). Each node can also be evaluated based on the average reliability ratios of its sensors. 
+
+```{r}
+#average value quality of each sensor in each node every 10 minute
+finaltempMonth%>%
+  group_by(date,node_id,sensor,node_sensparam, by10)%>%
+  mutate(ave_val_qual=sum(val_qual)/n())->finaltempMonth_valqual
+
+rm(finaltempMonth)
+
+```
+
+```{r}
+#summary table
+finaltempMonth_valqual%>%
+  as.data.frame()%>%
+  select(date, node_id, value_hrf, ave_val_qual, val_qual)%>%
+  group_by(date, node_id)%>%
+  mutate(`Number of invalid values`= n()-sum(val_qual),
+         `Mean Proportion of Valid Readings`=mean(ave_val_qual))%>%
+  select(date, node_id, `Number of invalid values`, `Mean Proportion of Valid Readings`)%>%
+  unique()%>%
+  as.data.frame()->finaltempMonth_valqual_summary
+
+```
+
+#### Overall node reliability by day
+
+By plotting out the number of invalid values registered by the sensors of each node for each day, we can quickly pick out which nodes are consistently unreliable (flat line at the top of plot), consistently reliable (flat line at the bottom of plot), or variable in its performance. Together with the `Mean Proportion of Valid Readings` plot, we can see that our MVP node of December is `001e61135cb`, the only node with consistently high proportions of valid readings every day.
+
+```{r, fig.height=15, fig.width=15}
+#plot
+finaltempMonth_valqual_summary%>%
+  mutate(date=ymd(date))%>%
+  ggplot()+
+  geom_line(aes(x=as.numeric(date), y=`Number of invalid values`), alpha=0.5, col='red')+
+  facet_wrap(~node_id, nrow=4)+
+  labs(x = "", title= 'Number of Invalid Values by Day - 2018 December') +
+  theme_light()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())->a
+
+finaltempMonth_valqual_summary%>%
+  mutate(date=ymd(date))%>%
+  ggplot()+
+  geom_line(aes(x=as.numeric(date), y=`Mean Proportion of Valid Readings`), alpha=0.5, col='darkgreen')+
+  facet_wrap(~node_id, nrow=4)+
+  labs(x = "", title= 'Mean Proportion of Valid Readings by Day - 2018 December') +
+  theme_light()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())->b
+
+grid.arrange(a, b, nrow=2)
+
+```
+
+```{r}
+rm(a, b)
+```
+
+
+#### Sensor reliability
+
+We can see which sensors within each node is contributing to this overall node reliability (or not) each day during the month, and each 10-minute interval during the day.
+
+From the month plot, it is apparent which nodes become virtually inactive (all sensors not recording valid values) on which day. An orange tile indicates that none of the recorded measurements were valid, while a grey tile indicates that no measurements were recorded at all. For the purpose of analysis, these two occurrences are both not ideal.
+
+```{r, fig.height=10, fig.width=15}
+finaltempMonth_valqual%>%
+  group_by(date, node_id, sensor)%>%
+  summarise(ave_val_qual=mean(ave_val_qual))%>%
+  ggplot()+
+      geom_tile(aes(x=date, y=sensor, fill=ave_val_qual), col='grey90')+
+      scale_fill_gradient2(midpoint = 0.5, low="#fc8d59",
+                           mid="#ffffbf",high="#99d594")+
+      theme_grey(base_size = 9) +
+      facet_wrap(~node_id, ncol=4)+
+      labs(x = "",y = "", title= '2018 December - Temperature sensors', fill='Ratio of valid values') +
+      scale_x_discrete(expand = c(0, 0)) +
+      scale_y_discrete(expand = c(0, 0))+
+      theme(axis.title.x=element_blank(),
+            axis.text.x=element_blank(),
+            axis.ticks.x=element_blank())
+```
+
+The day plot shows variations in sensor reliability at finer temporal detail:
+
+```{r, fig.height=10, fig.width=15}
+finaltempMonth_valqual%>%
+  filter(date=='2018-12-15')%>%
+    ggplot()+
+    geom_tile(aes(x=by10, y=sensor, fill=ave_val_qual), col='grey90')+
+    scale_fill_gradient2(midpoint = 0.5, low="#fc8d59",
+                         mid="#ffffbf",high="#99d594")+
+    facet_wrap(~node_id, ncol=4)+
+    theme_grey(base_size = 9) +
+    labs(x = "",y = "", title='2018-12-15 | Temperature sensors', fill='Ratio of valid values') +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0))+
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank())
+```
+
+##3.4 How do aggregated temperature trends look like based on valid values?
+
+For a day:
+```{r, fig.height=7, fig.width=15, warning=FALSE, message=FALSE}
+# finaltempMonth_valqual%>%
+#   filter(date=='2018-12-15')%>%
+#   select(node_id, sensor, value_hrf, by10, ave_val_qual)%>%
+#   filter(ave_val_qual==1)%>%
+#   group_by(node_id, by10)%>%
+#   summarise(mean=mean(value_hrf),
+#             max=max(value_hrf),
+#             min=min(value_hrf))%>%
+#   gather(key='diag', value='value', mean, max, min)%>%
+#   ggplot()+
+#   geom_tile(aes(x=by10, y=diag, fill=value), col='grey90')+
+#   scale_fill_viridis_c()+
+#   facet_wrap(~node_id, ncol=4)+
+#   theme_grey(base_size = 9) +
+#   labs(x = "",y = "", title='2018-12-15 | Temperature sensors - Mean, Max, Min', fill='Temperature value') +
+#   scale_x_discrete(expand = c(0, 0)) +
+#   scale_y_discrete(expand = c(0, 0))+
+#   theme(axis.title.x=element_blank(),
+#         axis.text.x=element_blank(),
+#         axis.ticks.x=element_blank())
+
+finaltempMonth_valqual%>%
+  select(date,node_id, sensor, node_sensparam, value_hrf, by10, ave_val_qual)%>%
+  filter(date=='2018-12-15')%>%
+  filter(ave_val_qual==1)%>%
+  as.data.frame()%>%
+  group_by(date, node_id,sensor,node_sensparam)%>%
+  mutate(value_hrf=mean(value_hrf))%>%
+  group_by(node_id, date)%>%
+  summarise(mean=mean(value_hrf),
+            max=max(value_hrf),
+            min=min(value_hrf))%>%
+  gather(key='diag', value='value', mean, max, min)%>%
+  ggplot()+
+  geom_tile(aes(x=date, y=diag, fill=value), col='grey90')+
+  scale_fill_viridis_c()+
+  facet_wrap(~node_id, ncol=4)+
+  theme_grey(base_size = 9) + 
+  labs(x = "",y = "", title='2018-12-15 | Temperature sensors - Mean, Max, Min') + 
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0))+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+
+For a month:
+
+```{r, fig.height=8, fig.width=15, warning=FALSE, message=FALSE}
+#month min mean max
+finaltempMonth_valqual%>%
+  select(date,node_id, sensor, node_sensparam, value_hrf, by10, ave_val_qual)%>%
+  filter(ave_val_qual==1)%>%
+  group_by(date, node_id,sensor,node_sensparam)%>%
+  mutate(value_hrf=mean(value_hrf))%>%
+  group_by(node_id, date)%>%
+  summarise(mean=mean(value_hrf),
+            max=max(value_hrf),
+            min=min(value_hrf))%>%
+  gather(key='diag', value='value', mean, max, min)%>%
+  ggplot()+
+  geom_tile(aes(x=date, y=diag, fill=value), col='grey90')+
+  scale_fill_viridis_c()+
+  facet_wrap(~node_id, ncol=4)+
+  theme_grey(base_size = 9) + 
+  labs(x = "",y = "", title='2018 December | Temperature sensors - Mean, Max, Min', fill='Temperature value') + 
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0))+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+```
+
+With the knowledge that there are periods of time during the day and days during the month in which no (valid) temperature data was collected, we may be reasonably apprehensive about the quality of any further time-based analysis we want to carry out on this dataset. The following section presents an imputation approach to this problem.
+
+#4. Imputing temperature values
+
+##4.1 Preparing dataframe for imputation
+
+```{r}
+
+#Preparing for imputation
+maindf<-finaltempMonth_valqual
+maindf$value_hrf[maindf$val_qual==0]<-NA #convert invalid values to NA
+summary(maindf$value_hrf)
+
+maindf%>%
+  as.data.frame()%>%
+  select(by10, node_id, lat, lon, value_hrf)%>%
+  group_by(by10, node_id, lat, lon)%>%
+  mutate(temp=mean(value_hrf, na.rm = TRUE))->maindf #aggregate valid values for each 10-minute interval
+
+
+maindf<-as.data.frame(unique(maindf))
+
+rm(finaltempMonth_valqual, finaltempMonth_valqual_summary)
+
+```
+
+```{r dataframe}
+df <-
+  maindf %>%
+  mutate(time = ymd_hms(by10)) %>%
+  select(-by10)
+
+rm(maindf)
+
+```
+
+```{r complement the dataframe}
+#create unique timestamps
+timestamps <- unique(df$time) %>% as.data.frame() %>% rename('time' = '.')
+
+#create empty data frame 
+complete_temp_group <- c()
+
+#fill in empty data frame
+for (i in unique(df$node_id)) {
+  longitude = df[df$node_id == i, ][1, 'lon'] %>% as.numeric()
+  latitude = df[df$node_id == i, ][1, 'lat'] %>% as.numeric()
+  
+  sample_node <-
+    df %>%
+    filter(node_id == i) %>%
+    right_join(., timestamps, by = 'time')%>%
+    mutate(node_id = i,
+           lon = longitude,
+           lat = latitude)
+  
+  complete_temp_group <-
+    rbind(complete_temp_group, sample_node)
+}
+
+rm(timestamps)
+```
+
+##4.2 Considering different imputation models
+
+We will first test 3 different imputation models based on what we believe could predict the actual values of the invalid reading:
+
+1. Mean values of neighbours within a 15000ft buffer
+2. Mean values from 5 closest neighbours
+3. Temperature readings recorded 10 minutes ago
+
+#### Generate dataset for model fitting - Identifying neighbours based on buffer
+
+```{r Get buffer distance}
+# Get buffer distance
+all_temp_nodes <-
+  complete_temp_group %>%
+  group_by(node_id) %>%
+  summarise(lat = first(lat),
+            lon = first(lon)) %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326, agr = 'constant')
+
+all_temp_nodes_harn <-
+  all_temp_nodes %>%
+  st_transform(crs = 102641)
+
+all_temp_nodes_harn_xy <-
+  all_temp_nodes_harn %>%
+  cbind(.,st_coordinates(all_temp_nodes_harn))  %>%
+  st_set_geometry(NULL) %>%
+  dplyr::select(X,Y) %>%
+  as.matrix()
+
+nn6 <-   
+  get.knnx(all_temp_nodes_harn_xy, all_temp_nodes_harn_xy, 2)$nn.dist %>%
+  as.data.frame() %>%
+  rename(distance = V2) %>%
+  select(distance)
+
+buffer_dist <- max(nn6$distance) + 10
+
+```
+
+```{r Know which nodes are inside buffer}
+
+# Know which nodes are inside buffer
+all_temp_nodes_harn_buffer_intersect <-
+  st_buffer(all_temp_nodes_harn, buffer_dist) %>%
+  st_join(all_temp_nodes_harn, join = st_intersects) %>%
+  st_set_geometry(NULL) %>%
+  select(node_id.x, node_id.y) %>%
+  rename(node_id = node_id.x, 
+         inside_buffer = node_id.y) %>%
+  filter(node_id != inside_buffer)
+
+```
+
+```{r Join temperature of nodes in buffer}
+# Join temperature 10 minutes ago of nodes in buffer
+df_buffer <-
+  left_join(complete_temp_group, all_temp_nodes_harn_buffer_intersect, by = 'node_id') %>%
+  left_join(complete_temp_group %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag,temp),
+            by = c('time' = 'time_lag',
+                   'inside_buffer' = 'node_id')) %>%
+  mutate(buffer_temp = temp.y,
+         temp = temp.x) %>%
+  select(node_id, inside_buffer, time, lon, lat, temp, buffer_temp)
+
+df_buffer <-
+  df_buffer %>%
+  group_by(node_id, time) %>%
+  summarise(lon = first(lon),
+            lat = first(lat),
+            temp = first(temp),
+            avg_buffer_temp = mean(buffer_temp, na.rm = TRUE))
+
+```
+
+#### Generate dataset for model fitting - Identifying 5 closest neighbours
+
+```{r Get nearest 5}
+# Get the node IDs of nearest 5
+nn7 <-   
+  get.knnx(all_temp_nodes_harn_xy, all_temp_nodes_harn_xy, 6)$nn.index %>%
+  as.data.frame() %>%
+  rename(N1 = V2, N2 = V3, N3 = V4, N4 = V5, N5 = V6) %>%
+  left_join(all_temp_nodes_harn %>%
+              mutate(index = as.numeric(row.names(.))), 
+            by = c('V1' = 'index')) %>%
+  select(node_id, V1, N1, N2, N3, N4, N5) 
+
+nn8 <-
+  left_join(nn7, nn7 %>%
+              select(node_id, V1),
+            by = c('N1' = 'V1')) %>%
+  left_join(nn7 %>%
+              select(node_id, V1),
+            by = c('N2' = 'V1')) %>%
+  left_join(nn7 %>%
+              select(node_id, V1),
+            by = c('N3' = 'V1')) %>%
+  left_join(nn7 %>%
+              select(node_id, V1),
+            by = c('N4' = 'V1')) %>%
+  left_join(nn7 %>%
+              select(node_id, V1),
+            by = c('N5' = 'V1')) %>%
+  select(node_id.x, node_id.y, node_id.x.x, node_id.y.y, 
+         node_id.x.x.x, node_id.y.y.y) %>%
+  rename(node_id = node_id.x,
+         nearest_1 = node_id.y,
+         nearest_2 = node_id.x.x,
+         nearest_3 = node_id.y.y,
+         nearest_4 = node_id.x.x.x,
+         nearest_5 = node_id.y.y.y)
+
+```
+
+```{r}
+# Get the average temperature 10 minutes ago of nearest five
+dat_buffer_nearest5 <-
+  left_join(df_buffer, nn8, by = 'node_id')%>%
+  left_join(df_buffer %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag, temp),
+            by = c('time' = 'time_lag',
+                   'nearest_1' = 'node_id')) %>%
+  left_join(df_buffer %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag, temp),
+            by = c('time' = 'time_lag',
+                   'nearest_2' = 'node_id')) %>%
+  left_join(df_buffer %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag, temp),
+            by = c('time' = 'time_lag',
+                   'nearest_3' = 'node_id')) %>%
+  left_join(df_buffer %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag, temp),
+            by = c('time' = 'time_lag',
+                   'nearest_4' = 'node_id')) %>%
+  left_join(df_buffer %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag, temp),
+            by = c('time' = 'time_lag',
+                   'nearest_5' = 'node_id')) %>%
+  select(node_id, lon, lat, time, temp.x, avg_buffer_temp, temp.y, temp.x.x, 
+         temp.y.y, temp.x.x.x, temp.y.y.y) %>%
+  rename(temp = temp.x,
+         nearest_1 = temp.y,
+         nearest_2 = temp.x.x,
+         nearest_3 = temp.y.y,
+         nearest_4 = temp.x.x.x,
+         nearest_5 = temp.y.y.y)
+
+dat_buffer_nearest5 <-
+  dat_buffer_nearest5 %>%
+  gather(nearest, value, nearest_1:nearest_5) %>%
+  group_by(node_id, time) %>%
+  summarise(lon = first(lon),
+            lat = first(lat), 
+            temp = first(temp),
+            avg_buffer_temp = first(avg_buffer_temp),
+            avg_nearby_temp = mean(value, na.rm = TRUE))
+
+```
+
+#### Generate dataset for model fitting - Identifying temperature from 10 minutes ago
+
+```{r Get temps from 10 minutes ago}
+# Get temps from 10 minutes ago
+dat_whole <-
+  left_join(dat_buffer_nearest5,
+            dat_buffer_nearest5 %>%
+              mutate(time_lag = time + 600) %>%
+              select(node_id, time_lag, temp),
+            by = c('time' = 'time_lag',
+                   'node_id' = 'node_id')) %>%
+  rename(temp = temp.x,
+         temp_10m = temp.y)
+
+```
+
+```{r}
+rm(dat_buffer_nearest5, nn6, nn7, nn8, all_temp_nodes_harn_buffer_intersect, all_temp_nodes_harn_xy, all_temp_nodes_harn)
+```
+
+
+#### Fit three models
+
+```{r model fitting, warning=FALSE, message=FALSE}
+dat_timemodel <- dat_whole[!(is.na(dat_whole$temp) | is.na(dat_whole$temp_10m)), ]
+dat_buffermodel <- dat_whole[!(is.na(dat_whole$temp) | is.na(dat_whole$avg_buffer_temp)), ]
+dat_nbormodel <- dat_whole[!(is.na(dat_whole$temp) | is.na(dat_whole$avg_nearby_temp)), ]
+
+# Time model
+mod7 <- lm(temp ~ temp_10m, data = dat_timemodel)
+
+# Buffer model
+mod8 <- lm(temp ~ avg_buffer_temp, data = dat_buffermodel)
+
+# Nearest 5 model
+mod9 <- lm(temp ~ avg_nearby_temp, data = dat_nbormodel)
+
+
+summary(mod7)
+summary(mod8)
+summary(mod9)
+
+```
+
+All 3 models appear to be strong (beta-coefficient approximately 1) and significant (p-value approximately 0) predictors of the temperature data. The R-square values for all 3 models are also high, with the lowest being 0.89 - the mean values from neighbours within a buffer can account for 89% of the variation in temperature values. 
+
+#### Cross-Validation
+
+To see if the models are generalisable to unseen data, we carry out k-fold cross validation, which applies the model to 100 folds of randomly-segmented data in the dataset. The model is generalisable if the performanceis consistently high across folds, indicated by a consistently low Mean Absolute Error value. The Mean Absolute Error tells us on average how much our predictions may deviate from the true values in terms of temperature.
+
+```{r cross-validation for time model, out.width=c('50%', '50%'), fig.show='hold'}
+# For time model
+
+fitControl <- trainControl(method = "cv", number = 100)
+
+set.seed(666)
+
+mod7Fit <- train(temp ~ temp_10m,
+                 data = dat_timemodel, 
+                 method = "lm", 
+                 trControl = fitControl)
+
+mod7Fit
+
+ggplot(as.data.frame(mod7Fit$resample), aes(Rsquared)) + 
+  geom_histogram(bins=20, fill='#b8d1e3', alpha = 0.6) +
+  labs(title = '100-Fold Cross-Validation R-squared',
+       subtitle = 'Imputation model based on readings 10 minutes ago',
+       x="R-squared",
+       y="Count") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"))
+
+
+ggplot(as.data.frame(mod7Fit$resample), aes(MAE)) + 
+  geom_histogram(bins=20, fill='#b8d1e3', alpha = 0.6) +
+  labs(title = '100-Fold Cross-Validation MAE',
+       subtitle = 'Imputation model based on readings 10 minutes ago',
+       x="MAE",
+       y="Count") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"))
+
+```
+
+
+
+```{r cross-validation for buffer model, out.width=c('50%', '50%'), fig.show='hold'}
+# For buffer model
+
+set.seed(666)
+
+mod8Fit <- train(temp ~ avg_buffer_temp,
+                 data = dat_buffermodel, 
+                 method = "lm", 
+                 trControl = fitControl)
+
+mod8Fit
+
+ggplot(as.data.frame(mod8Fit$resample), aes(Rsquared)) + 
+  geom_histogram(bins=20, fill='#b8d1e3', alpha = 0.6) +
+  labs(title = '100-Fold Cross-Validation R-squared',
+       subtitle = 'Imputation model based on nodes in 17K-feet buffer',
+       x="R-squared",
+       y="Count") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"))
+
+
+ggplot(as.data.frame(mod8Fit$resample), aes(MAE)) + 
+  geom_histogram(bins=20, fill='#b8d1e3', alpha = 0.6) +
+  labs(title = '100-Fold Cross-Validation MAE',
+       subtitle = 'Imputation model based on nodes in 17K-feet buffer',
+       x="MAE",
+       y="Count") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"))
+
+```
+
+
+```{r cross-validation for nearest 5 model, out.width=c('50%', '50%'), fig.show='hold'}
+# For nearest 5 model
+
+set.seed(666)
+
+mod9Fit <- train(temp ~ avg_nearby_temp,
+                 data = dat_nbormodel, 
+                 method = "lm", 
+                 trControl = fitControl)
+
+mod9Fit
+
+ggplot(as.data.frame(mod9Fit$resample), aes(Rsquared)) + 
+  geom_histogram(bins=20, fill='#b8d1e3', alpha = 0.6) +
+  labs(title = '100-Fold Cross-Validation R-squared',
+       subtitle = 'Imputation model based on nearest 5 neighbors',
+       x="R-squared",
+       y="Count") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"))
+
+
+ggplot(as.data.frame(mod9Fit$resample), aes(MAE)) + 
+  geom_histogram(bins=20, fill='#b8d1e3', alpha = 0.6) +
+  labs(title = '100-Fold Cross-Validation MAE',
+       subtitle = 'Imputation model based on nearest 5 neighbors',
+       x="MAE",
+       y="Count") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"))
+
+```
+
+
+
+####Compare metrics of three models
+
+```{r comparing three models}
+mod7PredValues <-
+  data.frame(node_id = dat_whole$node_id,
+             lon = dat_whole$lon,
+             lat = dat_whole$lat,
+             time = dat_whole$time,
+             observed = dat_whole$temp,
+             predicted = predict(mod7, dat_whole)) %>%
+  mutate(error = predicted - observed,
+         absError = abs(predicted - observed),
+         percentAbsError = abs((predicted - observed) / observed),
+         observedF = observed * 1.8 + 32,
+         predictedF = predicted * 1.8 + 32) %>%
+  mutate(absError_F = abs(predictedF - observedF),
+         percentAbsError_F = abs((predictedF - observedF) / observedF))
+
+mod8PredValues <-
+  data.frame(node_id = dat_whole$node_id,
+             lon = dat_whole$lon,
+             lat = dat_whole$lat,
+             time = dat_whole$time,
+             observed = dat_whole$temp,
+             predicted = predict(mod8, dat_whole)) %>%
+  mutate(error = predicted - observed,
+         absError = abs(predicted - observed),
+         percentAbsError = abs((predicted - observed) / observed),
+         observedF = observed * 1.8 + 32,
+         predictedF = predicted * 1.8 + 32) %>%
+  mutate(absError_F = abs(predictedF - observedF),
+         percentAbsError_F = abs((predictedF - observedF) / observedF))
+
+mod9PredValues <-
+  data.frame(node_id = dat_whole$node_id,
+             lon = dat_whole$lon,
+             lat = dat_whole$lat,
+             time = dat_whole$time,
+             observed = dat_whole$temp,
+             predicted = predict(mod9, dat_whole)) %>%
+  mutate(error = predicted - observed,
+         absError = abs(predicted - observed),
+         percentAbsError = abs((predicted - observed) / observed),
+         observedF = observed * 1.8 + 32,
+         predictedF = predicted * 1.8 + 32) %>%
+  mutate(absError_F = abs(predictedF - observedF),
+         percentAbsError_F = abs((predictedF - observedF) / observedF))
+
+data.frame('Model' = c('Time', 'Buffer', 'Nearest 5'),
+           'CV_Rsquared' = c(mod7Fit$results$Rsquared,
+                        mod8Fit$results$Rsquared,
+                        mod9Fit$results$Rsquared),
+           'CV_MAE' = c(mod7Fit$results$MAE,
+                        mod8Fit$results$MAE,
+                        mod9Fit$results$MAE),
+           'Number_of_NAs_after_imputation' = c(sum(is.na(mod7PredValues$observed) & is.na(mod7PredValues$predicted)),
+                                                sum(is.na(mod8PredValues$observed) & is.na(mod8PredValues$predicted)),
+                                                sum(is.na(mod9PredValues$observed) & is.na(mod9PredValues$predicted)))) %>%
+  kable(col.names = c('Model', 'Cross-Validation R^2', "Cross-Validation MAE", "Number of NAs after imputation"),
+        caption = 'Comparison of three models') %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                font_size = 15,
+                full_width = F) %>%
+  row_spec(c(1,3), background = "#ecf6fe")
+
+
+```
+
+From the above plots and table, we can make 2 observations:
+
+- Predicting missing temperature values based on time-neighbours yields the lowest MAE - our model will only be predicting temperatures off by 0.27 deg Celsius on average. The Buffer and Nearest 5 Neighbour models are similar in terms of performance. Using these models will yield predictions that are on average off by 1 deg Celsius (still considerably minimal).
+
+- However, 15812 observations have no time-neighbours - in other words, the sensors also did not collect any measurements 10 minutes before. This is not surprising, as we show how sensors in nodes generally tend to be inactive or yield invalid values in large blocks of time during the day, or for the whole day.
+
+Based on these 2 observations, we have decided to implement the imputation in two steps: first imputing using the time-neighbours model, then by using the Nearest 5 Neighbour model to impute for the remaining 15812 observations.
+
+Let's observe how this could complete the missing temperature trends in the plots below.
+
+####Compare observed vs. predicted
+
+```{r time model, fig.height = 13, fig.width = 13, warning = FALSE}
+ggplot(mod7PredValues %>%
+         gather(type, value, observed:predicted)) +
+  geom_line(aes(time, value, color = type, size = type)) +
+  scale_size_manual(values = c(1.2, 0.2)) +
+  facet_wrap(~node_id) +
+  labs(title = 'Observed vs. Predicted',
+       subtitle = 'Imputation model based on readings 10 minutes ago',
+       x="Time",
+       y="Temperature") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"),
+        axis.text.x=element_blank())
+
+```
+
+The predicted values for missing values among missing gaps in between 10-minute intervals seem to fit almost perfectly into the trend by the already available observed values.
+
+```{r nearest 5 model, fig.height = 13, fig.width = 13, warning = FALSE}
+ggplot(mod9PredValues %>%
+         gather(type, value, observed:predicted)) +
+  geom_line(aes(time, value, color = type, size = type)) +
+  scale_size_manual(values = c(1.2, 0.2)) +
+  facet_wrap(~node_id) +
+  labs(title = 'Observed vs. Predicted',
+       subtitle = 'Imputation model based on nearest 5 neighbors',
+       x="Time",
+       y="Temperature") +
+  theme_minimal() +
+  theme(plot.title=element_text(size=18, face="bold", vjust=-1),
+        plot.subtitle=element_text(size=15, face="italic", color="grey"),
+        axis.text.x=element_blank())
+
+```
+
+Using the Nearest 5 Neighbours Model next does seem to help us complete the trend pretty neatly!
+
+#### Map MAE per node of three models
+
+We also mapped the spatial variation in MAE per node for the 3 models to see if it is spatially generalisable.
+
+```{r mapping NAs per node of first model}
+#time model
+mod7_Error <-
+  mod7PredValues %>%
+  group_by(node_id) %>%
+  summarise(lon = first(lon),
+            lat = first(lat),
+            MAE_C = mean(absError, na.rm = TRUE),
+            MAPE_C = mean(percentAbsError, na.rm = TRUE),
+            MAE_F = mean(absError_F, na.rm = TRUE),
+            MAPE_F = mean(percentAbsError_F, na.rm = TRUE)) %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326, agr = 'constant')
+
+pal8 <- colorNumeric(palette = "Greens", domain = mod7_Error$MAE_C)
+
+labels8 <- 
+  sprintf("<strong>%s</strong><br/>MAE: %g",
+          mod7_Error$node_id, mod7_Error$MAE_C) %>% 
+  lapply(htmltools::HTML)
+
+map8 <-
+  leaflet(mod7_Error)%>%
+  addTiles()%>%
+  addCircleMarkers(
+    radius=7,
+    color= ~pal8(MAE_C), 
+    stroke=FALSE, 
+    fillOpacity = 1,
+    label = labels8,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "5px 10px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addProviderTiles("Stamen.TonerBackground") %>%
+  addLegend(pal = pal8, values = ~MAE_C, opacity = 0.7,
+            position = "topright", bins = 10, 
+            title = 'Mean Absolute Error')
+
+map8
+
+```
+
+```{r mapping NAs per code of second model}
+#buffer model
+mod8_Error <-
+  mod8PredValues %>%
+  group_by(node_id) %>%
+  summarise(lon = first(lon),
+            lat = first(lat),
+            MAE_C = mean(absError, na.rm = TRUE),
+            MAPE_C = mean(percentAbsError, na.rm = TRUE),
+            MAE_F = mean(absError_F, na.rm = TRUE),
+            MAPE_F = mean(percentAbsError_F, na.rm = TRUE)) %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326, agr = 'constant')
+
+pal9 <- colorNumeric(palette = "Greens", domain = mod8_Error$MAE_C)
+
+labels9 <- 
+  sprintf("<strong>%s</strong><br/>MAE: %g",
+          mod8_Error$node_id, mod8_Error$MAE_C) %>% 
+  lapply(htmltools::HTML)
+
+map9 <-
+  leaflet(mod8_Error)%>%
+  addTiles()%>%
+  addCircleMarkers(
+    radius=7,
+    color= ~pal9(MAE_C), 
+    stroke=FALSE, 
+    fillOpacity = 1,
+    label = labels9,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "5px 10px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addProviderTiles("Stamen.TonerBackground") %>%
+  addLegend(pal = pal9, values = ~MAE_C, opacity = 0.7,
+            position = "topright", bins = 10, 
+            title = 'Mean Absolute Error')
+
+map9
+
+```
+
+```{r mapping NAs per code of third model}
+#nearest 5 neighbour model
+mod9_Error <-
+  mod9PredValues %>%
+  group_by(node_id) %>%
+  summarise(lon = first(lon),
+            lat = first(lat),
+            MAE_C = mean(absError, na.rm = TRUE),
+            MAPE_C = mean(percentAbsError, na.rm = TRUE),
+            MAE_F = mean(absError_F, na.rm = TRUE),
+            MAPE_F = mean(percentAbsError_F, na.rm = TRUE)) %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326, agr = 'constant')
+
+pal10 <- colorNumeric(palette = "Greens", domain = mod9_Error$MAE_C)
+
+labels10 <- 
+  sprintf("<strong>%s</strong><br/>MAE: %g",
+          mod9_Error$node_id, mod9_Error$MAE_C) %>% 
+  lapply(htmltools::HTML)
+
+map10 <-
+  leaflet(mod9_Error)%>%
+  addTiles()%>%
+  addCircleMarkers(
+    radius=7,
+    color= ~pal10(MAE_C), 
+    stroke=FALSE, 
+    fillOpacity = 1,
+    label = labels10,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "5px 10px"),
+      textsize = "15px",
+      direction = "auto")) %>%
+  addProviderTiles("Stamen.TonerBackground") %>%
+  addLegend(pal = pal10, values = ~MAE_C, opacity = 0.7,
+            position = "topright", bins = 10, 
+            title = 'Mean Absolute Error')
+
+map10
+
+```
+
+```{r}
+rm(mod7, mod8, mod9, mod7_Error, mod8_Error, mod9_Error, mod7Fit, mod8Fit, mod9Fit)
+```
+
+
+##4.3Evaluating our data cleaning methodology
+
+To get a sense of how effective our data cleaning was in 'improving' the temperature data quality, we compared the average daily temperatures calculated from our dataset at each stage against the average daily temperatures registered by the National Weather Service. The assumption here is a reasonable one - the facilities at the weather stations will yield more accurate readings of temperature than the low-cost sensors installed in the AoT nodes. If our aggregated dataset values closely match the values from this service, it indicates that our method of data cleaning is indeed effective.
+
+```{r}
+## Create a complete dataset which includes all imputed values
+predicted_set = c()
+
+for (i in 1:dim(mod7PredValues)[1]){
+  if (!is.na(mod7PredValues[i, 'predicted'])){
+    predicted_set <- rbind(predicted_set, mod7PredValues[i, 'predicted'])
+  }
+  
+  else if (is.na(mod7PredValues[i, 'predicted']) & !is.na(mod9PredValues[i, 'predicted'])) {
+    predicted_set <- rbind(predicted_set, mod9PredValues[i, 'predicted'])
+  }
+  
+  else {
+    predicted_set <- rbind(predicted_set, mod8PredValues[i, 'predicted'])
+  }
+  
+}
+
+complete_set <-
+  data.frame(node_id = dat_whole$node_id,
+             time = dat_whole$time,
+             lon = dat_whole$lon,
+             lat = dat_whole$lat,
+             observed = dat_whole$temp,
+             predicted = predicted_set)
+
+```
+
+We compare our dataset averages at 3 points in the process: (1) Upon retrieval before cleaning (2) After defining and removing invalid values and (3) After imputation.
+
+```{r Three Plots}
+# Three Plots
+decWeather <-
+  read.csv('dec_weather_with_mean.csv') %>%
+  mutate(ActualMean = (ohare_avg + midway_avg + northerly_avg)/3)
+
+
+complete_set<-
+  mutate(complete_set, predicted1 = observed) %>%
+  mutate(ifelse(is.na(predicted1), predicted, observed))
+
+
+decDf <-
+  complete_set %>%
+  mutate(date=date(time)) %>%
+  group_by(date) %>%
+  summarise(ObservedMean=mean(observed, na.rm=TRUE), #(1)
+            PredictedMean=mean(predicted, na.rm=TRUE), #(2)
+            PredictedMean1=mean(predicted1, na.rm = TRUE)) #(3)
+
+decRaw <-
+  weatherMonth %>%
+  group_by(date) %>%
+  summarise(RawMean=mean(value_hrf, na.rm = TRUE))
+
+decValues <- cbind(decWeather, decRaw[,2], decDf[,c(2:4)])
+
+
+summary(lm(decValues$RawMean~decValues$ActualMean)) #(1)
+
+summary(lm(decValues$ObservedMean~decValues$ActualMean)) #(2)
+
+summary(lm(decValues$PredictedMean1~decValues$ActualMean)) #(3)
+```
+
+```{r, fig.width=15, fig.height=8}
+# Plots
+Raw <- 
+  ggplot(decValues) +
+  geom_point(aes(x=ActualMean, y=RawMean), col='indianred', size=5, alpha=0.5) +
+  geom_abline(slope=1, intercept=0) +
+  coord_equal(xlim=c(-10, 30), ylim=c(-10, 30)) +
+  labs(title='1. Upon retrieval from AoT database',
+      subtitle='Raw Mean Temperature against Actual Mean Temperature\n R2 = 0.671 | beta-Coefficient = 2.56 (p=0.00)', 
+      x='National Weather Service Data', 
+      y='Temperature values') +
+  theme_light()
+
+
+Pred <-
+  ggplot(decValues) +
+  geom_point(aes(x=ActualMean, y=PredictedMean1), col='indianred', size=5, alpha=0.5) +
+  geom_abline(slope=1, intercept=0) +
+  coord_equal(xlim=c(-10, 30), ylim=c(-10, 30)) +
+  labs(title='3. After imputation',
+      subtitle='Imputed Mean Temperature against Actual Mean Temperature\n R2 = 0.874 | beta-Coefficient = 0.957 (p=0.00)', 
+      x='National Weather Service Data', 
+      y='Temperature values') +
+  theme_light()
+
+
+Obs<-
+  ggplot(decValues) +
+  geom_point(aes(x=ActualMean, y=ObservedMean), col='indianred', size=5, alpha=0.5) +
+  geom_abline(slope=1, intercept=0) +
+  coord_equal(xlim=c(-10, 30), ylim=c(-10, 30)) +
+  labs(title='2. After defining and removing invalid sensor readings',
+      subtitle='Observed Mean Temperature against Actual Mean Temperature\n R2 = 0.874 | beta-Coefficient = 0.955 (p=0.00)', 
+      x='National Weather Service Data', 
+      y='Temperature values') +
+  theme_light()
+
+library(grid)
+
+grid.arrange(Raw, Obs, Pred, nrow=1, 
+             top=textGrob('How do the AoT temperature values compare against National Weather Service Data at different stages of data processing?' ))
+
+```
+
+From the above plot, we can observe that the average values of our dataset and the values collected by the National Weather Service (NWS) became almost identical even just after our removal of invalid values. Prior to that, the average values from the AoT dataset are almost double the NWS daily mean. After defining and removing invalid sensor readings, the beta-coefficient is almost 1 - this indicates that the values are almost perfectly identical and increasing at the same scale. 
+
+It is noted that imputation does not substantially improve the fit with NWS data. This could indicate that the imputation model was redundant. However, we suspect that this may be due to this comparison being carried out at the daily-aggregated level, which may have removed the local and finer temporal variability in temperatures that the imputed values could have accounted for. This can be further verified with more disaggregated temperature readings from NWS.
+
+#5. Further work
+To further understand the generalisability of this data cleaning process, we will apply this to the following scenarios:
+
+- **Generalisability to different months**: Apply this process to different month datasets from AoT, and specifically compare the performance of this cleaning process for months in different climatic seasons (winter vs summer)
+- **Generalisability to different sensor parameters**: Apply this process to different types of sensor values collected within the node, such as air quality. This may require certain tweaks to the method, given the different spatial nature of different sensor values (for e.g. vibration and magnetic field are highly local phenomena).

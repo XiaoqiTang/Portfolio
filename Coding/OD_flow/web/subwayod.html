@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=gb2312">
+    <title>OD</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            border: 0;
+        }
+
+        html {
+            height: 100%;
+        }
+
+        body {
+            height: 100%;
+        }
+
+        #main {
+            height: 100%;
+        }
+
+        .legend {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+        }
+
+        .legend table td {
+            width: 50px;
+            height: 20px;
+        }
+
+        .legend table input {
+            width: 50px;
+            height: 20px;
+            text-align: center;
+            background: #222;
+            color:#fff;
+        }
+    </style>
+</head>
+<body>
+<div id="main"></div>
+<div class="legend">
+    <table>
+        <tr>
+            <td style="background: #ff3333"></td>
+            <td><input type="text" id="level3" disabled></td>
+        </tr>
+        <tr>
+            <td style="background: orange"></td>
+            <td><input type="text" id="level2" value="1600"></td>
+        </tr>
+        <tr>
+            <td style="background: yellow"></td>
+            <td><input type="text" id="level1" value="1400"></td>
+        </tr>
+        <tr>
+            <td style="background: lime"></td>
+            <td><input type="text" id="level0" value="1200"></td>
+        </tr>
+        <tr>
+            <td style="background: #000;text-align:center;color:#fff">过滤</td>
+            <td><input type="text" id="level4"  value="1000"></td>
+        </tr>
+        <tr>
+            <td colspan="2">
+                <button id="refresh" style="width:100px;height:20px;background: #ccc;cursor: pointer">刷新</button>
+            </td>
+        </tr>
+    </table>
+</div>
+<script type="text/javascript" src="js/jquery-1.4.2.min.js"></script>
+<script type="text/javascript" src="js/echarts.js"></script>
+<script type="text/javascript" src="http://api.map.baidu.com/api?v=2.0&ak=ZUONbpqGBsYGXNIYHicvbAbM"></script>
+<script type="text/javascript" src="../data/geo.js"></script>
+<script type="text/javascript" src="../data/od.js"></script>
+<script type="text/javascript">
+
+    var map;
+    var BMapExt;
+    var option;
+    var myChart;
+    var option;
+    var container;
+
+    getOdData();
+
+
+    function getOdData(){
+        resOdData=odData.slice(0);
+        var maxShow=getThreshold('level4');
+
+        for(var i=0;i<resOdData.length;i++){
+            if(parseInt(resOdData[i][1].value)<=maxShow){
+                resOdData.splice(i,1);
+                i--;
+            }
+        }
+    }
+
+    $("#refresh").click(function (e) {
+        
+        getOdData();
+        myChart.dispose();
+        myChart = BMapExt.initECharts(container);
+        // var option = myChart.getOption();
+        option.series[0].markLine.data = resOdData.slice(0);
+        BMapExt.setOption(option);
+    });
+
+    // 路径配置，模块化引入
+    require.config({
+        paths: {
+            echarts: './echarts/js'
+        },
+        packages: [{
+            name: 'BMap',
+            location: './BMap/src',
+            main: 'main'
+        }]
+    });
+
+    require(['echarts', 'BMap', 'echarts/chart/map'], function (echarts, BMapExtension) {
+        $('#main').css({
+            height: $('body').height(),
+            width: $('body').width()
+        });
+
+        // 初始化地图
+        BMapExt = new BMapExtension($('#main')[0], BMap, echarts, {
+            enableMapClick: false
+        });
+        map = BMapExt.getMap();
+        container = BMapExt.getEchartsContainer();
+        map.enableScrollWheelZoom(true);
+        getViewCenter();
+        var baseMapStyle = [{
+            "featureType": "land",
+            "elementType": "geometry",
+            "stylers": {"color": "#212121"}
+        }, {
+            "featureType": "building",
+            "elementType": "geometry",
+            "stylers": {"color": "#2b2b2b"}
+        }, {
+            "featureType": "highway",
+            "elementType": "all",
+            "stylers": {"lightness": -42, "saturation": -91}
+        }, {
+            "featureType": "arterial",
+            "elementType": "geometry",
+            "stylers": {"lightness": -77, "saturation": -94}
+        }, {
+            "featureType": "green",
+            "elementType": "geometry",
+            "stylers": {"color": "#1b1b1b"}
+        }, {
+            "featureType": "water",
+            "elementType": "geometry",
+            "stylers": {"color": "#181818"}
+        }, {
+            "featureType": "subway",
+            "elementType": "geometry.stroke",
+            "stylers": {"color": "#181818"}
+        }, {"featureType": "railway", "elementType": "geometry", "stylers": {"lightness": -52}}, {
+            "featureType": "all",
+            "elementType": "labels.text.stroke",
+            "stylers": {"color": "#313131"}
+        }, {
+            "featureType": "all",
+            "elementType": "labels.text.fill",
+            "stylers": {"color": "#8b8787"}
+        }, {
+            "featureType": "manmade",
+            "elementType": "geometry",
+            "stylers": {"color": "#1b1b1b"}
+        }, {
+            "featureType": "local",
+            "elementType": "geometry",
+            "stylers": {"lightness": -75, "saturation": -91}
+        }, {
+            "featureType": "subway",
+            "elementType": "geometry",
+            "stylers": {"lightness": -65}
+        }, {
+            "featureType": "railway",
+            "elementType": "geometry",
+            "stylers": {"color": "#444444", "weight": "1", "lightness": -44, "visibility": "on"}
+        }, {
+            "featureType": "highway",
+            "elementType": "geometry",
+            "stylers": {"color": "#444444", "weight": "1", "lightness": -44}
+        }];
+        // 地图自定义样式
+        map.setMapStyle({
+            styleJson: baseMapStyle
+        });
+
+        //配置样式及数据
+        option = {
+            color: ['gold', 'aqua', 'lime'],
+            title: {
+                text: '',
+                x: 'right',
+                y: 'bottom',
+                textStyle: {
+                    color: '#fff'
+                }
+            },
+            tooltip: {
+                trigger: 'item',
+                formatter: function (v) {
+                    return v[1].replace(':', ' > ')+':'+v[2];
+                }
+            },
+            series: [
+                {
+                    name: '地铁',
+                    type: 'map',
+                    mapType: 'none',
+                    data: [],
+                    geoCoord: geoData,
+                    markLine: {
+                        smooth: true,
+                        effect: {
+                            show: true,
+                            scaleSize: 1,
+                            period: 30,
+                            shadowBlur: 10
+                        },
+                        itemStyle: {
+                            normal: {
+                                borderWidth: 1,
+                                label: {
+                                    show: false
+                                },
+                                lineStyle: {
+                                    type: 'solid',
+                                    shadowBlur: 10
+                                },
+                                color: function (value) {
+                                    var temp = value.data[1].value;
+                                    return temp > getThreshold('level2') ? '#ff3333' : temp > getThreshold('level1') ? "orange" : temp > getThreshold('level0') ? "yellow" : 'lime';
+                                }
+                            }
+                        },
+                        data: resOdData
+                    }
+                }]
+        };
+        myChart = BMapExt.initECharts(container);
+
+        window.onresize = myChart.resize;
+        BMapExt.setOption(option);
+    });
+
+    function getThreshold(id){
+        return parseInt($('#'+id).val(),10);
+    }
+
+    function getViewCenter(){
+        var points=[];
+
+        for (key in geoData){
+            points.push(new BMap.Point(parseFloat(geoData[key][0]),parseFloat(geoData[key][1])));
+        }
+
+        map.setViewport(points);
+    }
+
+</script>
+</body>
+
+</html>
