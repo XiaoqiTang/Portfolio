@@ -22,7 +22,8 @@ density in Philadelphia
 
 Uploaded sensors readings in chicago into an SQL database using SQLite3 and use imputation model to predict the readings using RStudio and designed a real-time web dashboard by Shiny and JavaScript;
 
-This is a capstone project, still working on it...
+R markdown: https://pennmusa.github.io/MUSA_801.io/project_9/index.html
+Interactive map: https://xiaoqitang.github.io/MUSA801-AoT/
 
 ### 2. Hedonic Home Price Prediction
 
