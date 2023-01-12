@@ -46,4 +46,5 @@ Developed a real-time dynamic heat map of Shenzhen City, and established an accu
 
 Adopted poison model to analyze crime risk in Cincinnati by RStudio and created user interface (UI) about crime risk use case in
 Adobe XD
+Youtube link: https://www.youtube.com/watch?v=9Wm3gTvM9Dc&ab_channel=Xiaoqi
 
